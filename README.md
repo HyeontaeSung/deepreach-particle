@@ -67,7 +67,7 @@ python run_experiment.py --mode test --experiment_name VD --checkpoint_toload -1
 The plot will be available at ./runs/VD/basic_BRTs.png.
 
 
-For any question, please feel free to raise an issue. Also note that we may migrate the repo after RSS decision released.
+For any question, please feel free to raise an issue. 
 
 
 ## Coming soon

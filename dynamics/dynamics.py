@@ -36,7 +36,7 @@ class Dynamics(ABC):
         self.deepReach_model = deepReach_model
 
         assert self.loss_type in [
-            'brt_hjivi', 'brat_hjivi'], f'loss type {self.loss_type} not recognized'
+            'brt_hjivi', 'brat_hjivi', 'brt_hjivi_TV'], f'loss type {self.loss_type} not recognized'
         if self.loss_type == 'brat_hjivi':
             assert callable(self.reach_fn) and callable(self.avoid_fn)
         assert self.set_mode in [
@@ -462,7 +462,1093 @@ class Dubins3D(Dynamics):
             'y_axis_idx': 1,
             'z_axis_idx': 2,
         }
+
+class TwoDubins3D_TimeVarying(Dynamics):
+    """
+        One ego agent, and the other one obstacle agent with time-varying control
+        The obstacle agent has a sequence of control inputs that are linearly interpolated
+    """
+    def __init__(self, set_mode: str):
+        self.goalR = 0.2 # here it works as a safe distance
+        self.velocity = 1.
+        self.omega_max = 1.2
+        self.control_sequence_length = 2
+        self.tMax = 1.0  # Total simulation time for Dubins tMax is 1.0
+                         # find the converging time
+        
+        # state: x1, y1, θ1, x2, y2, θ2, u_0, u_{T-1}
+        # where u_i are the control sequence for the second vehicle
+        state_ranges = [
+            [-1.0, 1.0], [-1.0, 1.0], [-math.pi, math.pi],  # First vehicle
+            [-1.0, 1.0], [-1.0, 1.0], [-math.pi, math.pi],  # Second vehicle
+        ]
+        # Add control sequence ranges
+        for _ in range(self.control_sequence_length):
+            state_ranges.append([-self.omega_max*1.1, self.omega_max*1.1])
+            
+        self.state_range_ = torch.tensor(state_ranges).cuda()
+        self.control_range_ = torch.tensor(
+            [[-self.omega_max, self.omega_max]]).cuda()
+        self.eps_var = torch.tensor([1]).cuda()
+        self.control_init = torch.zeros(1).cuda()
+        self.set_mode = set_mode
+        self.avoid_fn_weight = 1.
+        self.reach_fn_weight = 1.
+        self.obstacles = [[0., 0.6, 0.1], [0.4, -0.8, 0.15] , [-0.6, -0.5, 0.2], [-0.7, 0 ,0.3]]
+        if set_mode == 'reach_avoid':
+            l_type = 'brat_hjivi'
+        else:
+            l_type = 'brt_hjivi_TV'
+
+        state_mean_ = (self.state_range_[:, 0]+self.state_range_[:, 1])/2.0
+        state_var_ = (self.state_range_[:, 1]-self.state_range_[:, 0])/2.0
+        super().__init__(
+            name="TwoDubins3D_TimeVarying", loss_type=l_type, set_mode=set_mode,
+            state_dim=6+self.control_sequence_length, input_dim=9+self.control_sequence_length, control_dim=1, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def interpolate_control(self, state, time, T):
+        # T = self.tMax # when MPC is used, T is the MPC horizon, so it is not always tMax, so we need to use tMax here
+        """
+        Linear interpolation of control sequence for the second vehicle
+        state: [x1, y1, θ1, x2, y2, θ2, u_0, u_1, ..., u_{T-1}] Typically T is 2 here (u_0 u_(T-1))
+        time: current time (raw time values over full simulation time)
+        
+        Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        """
+        # Extract control sequence (last control_sequence_length elements)
+        control_sequence = state[..., 6:6+self.control_sequence_length]
+        
+        # Ensure time is on the same device as state
+        if isinstance(time, (int, float)):
+            time = torch.tensor(time, device=state.device, dtype=state.dtype)
+        else:
+            time = time.to(device=state.device)
+        
+        # Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        u_0 = control_sequence[..., 0]
+        u_1 = control_sequence[..., 1]
+        # angular velocity
+        control_omega = u_0 + (u_1 - u_0) * (time / self.tMax )
+        
+        control_value = control_omega.unsqueeze(-1)  # Shape: [..., 1]
+        return control_value
+
+    def constant_interpolate_control(self, state, time, T):
+        """
+        Piecewise constant control sequence for the second vehicle
+        state: [x1, y1, θ1, x2, y2, θ2, u_0, u_1, ..., u_{T-1}]
+        time: current time (raw time values over full simulation time)
+        
+        Time segments: [0, tMax/T) -> u_0, [tMax/T, 2*tMax/T) -> u_1, ..., [(T-1)*tMax/T, tMax] -> u_{T-1}
+        """
+        # Extract control sequence (last control_sequence_length elements)
+        control_sequence = state[..., 6:6+self.control_sequence_length]
+        
+        # Ensure time is on the same device as state
+        if isinstance(time, (int, float)):
+            time = torch.tensor(time, device=state.device, dtype=state.dtype)
+        else:
+            time = time.to(device=state.device)
+
+        # Map raw time to control index
+        # Each control gets tMax/T of the total simulation time
+        index = (time * self.control_sequence_length / T).floor().long()
+        
+        # Clamp index to valid range
+        index = torch.clamp(index, 0, self.control_sequence_length - 1)
+        
+        # Get the control value for the current time segment
+        control_value = torch.gather(control_sequence, -1, index.unsqueeze(-1)).squeeze(-1)
+        
+        return control_value
+        
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        wrapped_state[..., 5] = (wrapped_state[..., 5] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+2
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:7] = input[..., 4:6]
+        transformed_input[..., 7] = torch.sin(input[..., 6]*math.pi)
+        transformed_input[..., 8] = torch.cos(input[..., 6]*math.pi)
+        transformed_input[..., 9:] = input[..., 7:]
+
+        return transformed_input.cuda()
+
+    # TwoDubins3D_TimeVarying dynamics
+    # \dot x1    = v \cos \theta1
+    # \dot y1    = v \sin \theta1
+    # \dot \theta1 = u1
+    # \dot x2    = v \cos \theta2
+    # \dot y2    = v \sin \theta2
+    # \dot \theta2 = u2_interpolated(t)
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = self.velocity * torch.cos(state[..., 2])
+        dsdt[..., 1] = self.velocity * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        if time is not None:
+            predicted_control = self.interpolate_control(state, time, T)
+            dsdt[..., 3] = self.velocity * torch.cos(predicted_control[..., 0])
+            dsdt[..., 4] = self.velocity * torch.sin(predicted_control[..., 0])
+        else:
+            dsdt[..., 3] = self.velocity * torch.cos(state[..., 5])
+            dsdt[..., 4] = self.velocity * torch.sin(state[..., 5])
+        
+        return dsdt
+
+    def reach_fn(self, state):
+        state_ = state*1.0
+        state_[..., 0] = state_[..., 0] - 0.
+        state_[..., 1] = state_[..., 1]
+        return (torch.norm(state[..., :2], dim=-1)-0.3)*self.reach_fn_weight
+
+    def avoid_fn(self, state):
+        # TODO: can speed it up by batch computation 
+        avoid_val = torch.ones_like(state[...,-1])*torch.finfo().max
+        for obstacle in self.obstacles:
+            rel_state=state[...,:2]*1.0
+            rel_state[...,0]-=obstacle[0]
+            rel_state[...,1]-=obstacle[1]
+            avoid_val=torch.minimum(avoid_val, (torch.norm(rel_state, dim=-1)-obstacle[2]))
+        return self.avoid_fn_weight* avoid_val
+
+    def boundary_fn(self, state):
+        if self.set_mode in ['avoid', 'reach'] :
+            return torch.norm(state[...,:2]-state[...,3:5], dim=-1) - self.goalR
+        else:
+            return torch.maximum(self.reach_fn(state), -self.avoid_fn(state))
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        # TODO: implement a CBF-like function V_\gamma, i.e.sup min exp(\gamma*(s-t))*l(x(s))
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds, time=None, T=None):
+        if self.set_mode == "avoid":
+            # First vehicle: use maximum control (worst-case for avoid)
+            h = self.velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) + self.omega_max * torch.abs(dvds[..., 2])
+            
+            # Second vehicle: use predicted/interpolated control input
+            predicted_control = self.interpolate_control(state, time, T)
+            h += self.velocity * (torch.cos(state[..., 5]) * dvds[..., 3] + torch.sin(state[..., 5]) * dvds[..., 4]) + predicted_control[..., 0] * dvds[..., 5]
+
+            return h
+        elif self.set_mode in ['reach', 'reach_avoid']:
+            return self.velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2])
+        else:
+            raise NotImplementedError
+
+    def optimal_control(self, state, dvds):
+        if self.set_mode == "avoid":
+            return (self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        elif self.set_mode in ['reach', 'reach_avoid']:
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [-0.9, 0, 0, 0.9, 0.0, 3.14, 0, 1.2],
+            'state_labels': ['x1', 'y1', r'$\theta$1', 'x2', 'y2', r'$\theta$2'] + [f'u_{i}' for i in range(self.control_sequence_length)],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 6,
+        }
+class TwoDubins3D_Worst(Dynamics):
+    """
+        One ego agent, and the other one obstacle agent
+        dummy input at last
+    """
+    def __init__(self, set_mode: str):
+        self.goalR = 0.2 # here it works as a safe distance
+        self.velocity = 1.
+        self.omega_max = 1.2
+        # state: x, y, \theta, x2, y2, \theta2, dummy,
+        self.state_range_ = torch.tensor(
+            [[-1.0, 1.0], [-1.0, 1.0], [-math.pi, math.pi], 
+            [-1.0, 1.0], [-1.0, 1.0],[-math.pi, math.pi],
+            [-0.05, 0.05]]).cuda()
+        self.control_range_ = torch.tensor(
+            [[-self.omega_max, self.omega_max],[-self.omega_max, self.omega_max]]).cuda()
+        self.eps_var = torch.tensor([1]).cuda()
+        self.control_init = torch.zeros(2).cuda()
+        self.set_mode = set_mode
+        self.avoid_fn_weight = 1.
+        self.reach_fn_weight = 1.
+        self.obstacles = [[0., 0.6, 0.1], [0.4, -0.8, 0.15] , [-0.6, -0.5, 0.2], [-0.7, 0 ,0.3]]
+        if set_mode == 'reach_avoid':
+            l_type = 'brat_hjivi'
+        else:
+            l_type = 'brt_hjivi'
+
+        state_mean_ = (self.state_range_[:, 0]+self.state_range_[:, 1])/2.0
+        state_var_ = (self.state_range_[:, 1]-self.state_range_[:, 0])/2.0
+        super().__init__(
+            name="TwoDubins3D", loss_type=l_type, set_mode=set_mode,
+            state_dim=7, input_dim=10, control_dim=2, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [-self.omega_max, self.omega_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        wrapped_state[..., 5] = (wrapped_state[..., 5] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+2
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:7] = input[..., 4:6]
+        transformed_input[..., 7] = torch.sin(input[..., 6]*math.pi)
+        transformed_input[..., 8] = torch.cos(input[..., 6]*math.pi)
+        transformed_input[..., 9:] = input[..., 7:]
+
+        return transformed_input.cuda()
+
+    # TwoDubins3D dynamics
+    # \dot x1    = v \cos \theta1
+    # \dot y1    = v \sin \theta1
+    # \dot \theta1 = u1
+    # \dot x2    = v \cos \theta2
+    # \dot y2    = v \sin \theta2
+    # \dot \theta2 = u2
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = self.velocity * torch.cos(state[..., 2])
+        dsdt[..., 1] = self.velocity * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        dsdt[..., 3] = self.velocity * torch.cos(state[..., 5])
+        dsdt[..., 4] = self.velocity * torch.sin(state[..., 5])
+        dsdt[..., 5] = control[..., 1]
+        return dsdt
+
+    def reach_fn(self, state):
+        state_ = state*1.0
+        state_[..., 0] = state_[..., 0] - 0.
+        state_[..., 1] = state_[..., 1]
+        return (torch.norm(state[..., :2], dim=-1)-0.3)*self.reach_fn_weight
+
+    def avoid_fn(self, state):
+        # TODO: can speed it up by batch computation 
+        avoid_val = torch.ones_like(state[...,-1])*torch.finfo().max
+        for obstacle in self.obstacles:
+            rel_state=state[...,:2]*1.0
+            rel_state[...,0]-=obstacle[0]
+            rel_state[...,1]-=obstacle[1]
+            avoid_val=torch.minimum(avoid_val, (torch.norm(rel_state, dim=-1)-obstacle[2]))
+        return self.avoid_fn_weight* avoid_val
+
+    def boundary_fn(self, state):
+        if self.set_mode in ['avoid', 'reach'] :
+            return torch.norm(state[...,:2]-state[...,3:5], dim=-1) - self.goalR
+        else:
+            return torch.maximum(self.reach_fn(state), -self.avoid_fn(state))
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        # TODO: implement a CBF-like function V_\gamma, i.e.sup min exp(\gamma*(s-t))*l(x(s))
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds):
+        if self.set_mode == "avoid":
+            h = self.velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) + self.omega_max * torch.abs(dvds[..., 2])\
+                            + self.velocity * (torch.cos(state[..., 5]) * dvds[..., 3] + torch.sin(state[..., 5]) * dvds[..., 4]) - self.omega_max * torch.abs(dvds[..., 5])
+            return h
+        elif self.set_mode in ['reach', 'reach_avoid']:
+            return self.velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2])
+        else:
+            raise NotImplementedError
+
+    def optimal_control(self, state, dvds):
+        if self.set_mode == "avoid":
+            return (self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        elif self.set_mode in ['reach', 'reach_avoid']:
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [-0.9, 0, 0, 0.9, 0, 3.14, 0],
+            'state_labels': ['x1', 'y1', r'$\theta$1', 'x2', 'y2', r'$\theta$2','umin'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 6,
+        }
+
+class Dubins3D2D(Dynamics):
+    def __init__(self, set_mode: str):
+        self.goalR = 0.5
+        self.max_velocity = 1.
+        self.omega_max = 2.0
+        self.v_max = 2.0
+        self.v_min = 0.0
+        self.state_range_ = torch.tensor([[-5, 5],[-5, 5],[-math.pi, math.pi]]).cuda()
+        self.control_range_ =torch.tensor([[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]).cuda()
+        self.eps_var=torch.tensor([1]).cuda()
+        self.control_init= torch.zeros(2).cuda()
+        self.set_mode=set_mode
+
+        state_mean_=(self.state_range_[:,0]+self.state_range_[:,1])/2.0
+        state_var_=(self.state_range_[:,1]-self.state_range_[:,0])/2.0
+        super().__init__(
+            name="Dubins3D2D", loss_type='brt_hjivi', set_mode=set_mode,
+            state_dim=3, input_dim=5, control_dim=2, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),    
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
     
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (
+            wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+1
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        return transformed_input.cuda()
+    
+    # Dubins3D dynamics with 2D control
+    # \dot x    = u_2 \cos \theta
+    # \dot y    = u_2 \sin \theta
+    # \dot \theta = u_1
+    # u_1, u_2 : angular and linear velocity
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = control[..., 1] * torch.cos(state[..., 2])
+        dsdt[..., 1] = control[..., 1] * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2], dim=-1) - self.goalR
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            h = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max * optimal_v_indicator, 
+                           self.v_min * optimal_v_indicator)
+            return h + self.omega_max * torch.abs(dvds[..., 2]) 
+        elif self.set_mode =="reach":
+            # TODO: check this
+            return self.max_velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2]) 
+        else:
+            raise NotImplementedError
+        
+    def optimal_control(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            optimal_v = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max, 
+                           self.v_min)
+            optimal_omega = self.omega_max * torch.sign(dvds[..., 2])
+            return torch.stack([optimal_omega, optimal_v], dim=-1)
+        elif self.set_mode =="reach":
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0],
+            'state_labels': ['x', 'y', r'$\theta$'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
+
+class Dubins3D2D_Human_Worst(Dynamics):
+    def __init__(self, set_mode: str):
+        self.goalR = 0.5
+        self.max_velocity = 1.
+        self.omega_max = 2.0
+        self.v_max = 2.0
+        self.v_min = 0.0
+        self.v_human_max = 1.0
+        self.v_human_min = 0.0
+        self.state_range_ = torch.tensor([[-5, 5],[-5, 5],[-math.pi, math.pi], [-5, 5], [-5, 5]]).cuda()
+        self.control_range_ =  \
+            torch.tensor([[-self.omega_max, self.omega_max], [self.v_min, self.v_max], \
+                 [-math.pi, math.pi], [self.v_human_min, self.v_human_max]]).cuda()
+        self.eps_var=torch.tensor([1]).cuda()
+        self.control_init= torch.zeros(2).cuda()
+        self.set_mode=set_mode
+
+        state_mean_=(self.state_range_[:,0]+self.state_range_[:,1])/2.0
+        state_var_=(self.state_range_[:,1]-self.state_range_[:,0])/2.0
+        super().__init__(
+            name="Dubins3D2D_Human_Worst", loss_type='brt_hjivi', set_mode=set_mode,
+            state_dim=5, input_dim=7, control_dim=4, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),    
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [self.v_min, self.v_max], [-math.pi, math.pi], [self.v_human_min, self.v_human_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+    
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (
+            wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+1
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:] = input[..., 4:]
+        return transformed_input.cuda()
+    
+    # Dubins3D dynamics with 2D control + human
+    # \dot x    = u_2 \cos \theta
+    # \dot y    = u_2 \sin \theta
+    # \dot \theta = u_1
+    # \dot x_h = u_4 \cos \u_3
+    # \dot y_h = u_4 \sin \u_3
+
+    # u_1, u_2 : angular and linear velocity
+    # u_3, u_4 : heading angle and linear velocity of human
+    
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = control[..., 1] * torch.cos(state[..., 2])
+        dsdt[..., 1] = control[..., 1] * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        dsdt[..., 3] = control[..., 3] * torch.cos(control[..., 2])
+        dsdt[..., 4] = control[..., 3] * torch.sin(control[..., 2])
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2] - state[..., 3:5], dim=-1) - self.goalR
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            h = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max * optimal_v_indicator, 
+                           self.v_min * optimal_v_indicator)
+            h = h + self.omega_max * torch.abs(dvds[..., 2]) 
+            # h = h - self.v_human_max * torch.norm(torch.stack([dvds[..., 3], dvds[..., 4]], dim=-1), dim=-1)
+            h = h - self.v_human_max * torch.hypot(dvds[..., 3], dvds[..., 4])
+            return h
+
+        elif self.set_mode =="reach":
+            # TODO: check this
+            return self.max_velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2]) 
+        else:
+            raise NotImplementedError
+        
+    def optimal_control(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            optimal_v = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max, 
+                           self.v_min)
+            optimal_omega = self.omega_max * torch.sign(dvds[..., 2])
+
+            optimal_heading_human = torch.atan2(-dvds[..., 4], -dvds[..., 3]) # return in [-pi, pi]
+            optimal_v_human = torch.full_like(optimal_omega, self.v_human_max)
+            return torch.stack([optimal_omega, optimal_v, optimal_heading_human, optimal_v_human], dim=-1)
+        elif self.set_mode =="reach":
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0, 0, 0],
+            'state_labels': ['x', 'y', r'$\theta$', r'$x_h$', r'$y_h$'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
+
+class Dubins3D2D_Human_predict(Dynamics):
+    def __init__(self, set_mode: str):
+        self.goalR = 0.5
+        self.max_velocity = 1.
+        self.omega_max = 2.0
+        self.v_max = 2.0
+        self.v_min = 0.0
+        self.v_human_max = 1.0
+        self.v_human_min = 0.0
+        self.state_range_ = torch.tensor([[-5, 5],[-5, 5],[-math.pi, math.pi], [-5, 5], [-5, 5],\
+            [-math.pi, math.pi], [self.v_human_min, self.v_human_max*1.1]]).cuda()
+        self.control_range_ =  \
+            torch.tensor([[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]).cuda()
+        self.eps_var=torch.tensor([1]).cuda()
+        self.control_init= torch.zeros(2).cuda()
+        self.set_mode=set_mode
+
+        state_mean_=(self.state_range_[:,0]+self.state_range_[:,1])/2.0
+        state_var_=(self.state_range_[:,1]-self.state_range_[:,0])/2.0
+        super().__init__(
+            name="Dubins3D2D_Human_predict", loss_type='brt_hjivi', set_mode=set_mode,
+            state_dim=7, input_dim=10, control_dim=2, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),    
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+    
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (
+            wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+2
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:7] = input[..., 4:6]
+        transformed_input[..., 7] = torch.sin(input[..., 6]*math.pi)
+        transformed_input[..., 8] = torch.cos(input[..., 6]*math.pi)
+        transformed_input[..., 9:] = input[..., 7:]
+
+        return transformed_input.cuda()
+    
+    # Dubins3D dynamics with 2D control + human
+    # \dot x    = u_2 \cos \theta
+    # \dot y    = u_2 \sin \theta
+    # \dot \theta = u_1
+    # \dot x_h = u_4 \cos \u_3
+    # \dot y_h = u_4 \sin \u_3
+
+    # u_1, u_2 : angular and linear velocity
+    # u_3, u_4 : heading angle and linear velocity of human
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = control[..., 1] * torch.cos(state[..., 2])
+        dsdt[..., 1] = control[..., 1] * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        dsdt[..., 3] = state[..., 6] * torch.cos(state[..., 5])
+        dsdt[..., 4] = state[..., 6] * torch.sin(state[..., 5])
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2] - state[..., 3:5], dim=-1) - self.goalR
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            h = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max * optimal_v_indicator, 
+                           self.v_min * optimal_v_indicator)
+            h = h + self.omega_max * torch.abs(dvds[..., 2]) 
+            h = h +  dvds[..., 3] * state[..., 6] * torch.cos(state[..., 5]) + dvds[..., 4] * state[..., 6] * torch.sin(state[..., 5])
+            return h
+
+        elif self.set_mode =="reach":
+            # TODO: check this
+            return self.max_velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2]) 
+        else:
+            raise NotImplementedError
+        
+    def optimal_control(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            optimal_v = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max, 
+                           self.v_min)
+            optimal_omega = self.omega_max * torch.sign(dvds[..., 2])
+
+            return torch.stack([optimal_omega, optimal_v], dim=-1)
+        elif self.set_mode =="reach":
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0, 0, 0, -3.14, 1],
+            'state_labels': ['x', 'y', r'$\theta$', 'x_h', 'y_h', r'$\theta_h$', 'v_h'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
+
+class Dubins3D2D_Human_predict_TV(Dynamics):
+    def __init__(self, set_mode: str):
+        self.goalR = 0.5
+        self.max_velocity = 1.
+        self.omega_max = 2.0
+        self.v_max = 2.0
+        self.v_min = 0.0
+        self.v_human_max = 1.0
+        self.v_human_min = 0.0
+        self.control_sequence_length = 4
+        self.tMax = 2.0
+        self.state_range_ = torch.tensor([[-5, 5],[-5, 5],[-math.pi, math.pi], [-5, 5], [-5, 5],\
+            [-math.pi, math.pi], [-math.pi, math.pi], [self.v_human_min, self.v_human_max*1.1], [self.v_human_min, self.v_human_max*1.1]]).cuda()
+        self.control_range_ =  \
+            torch.tensor([[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]).cuda()
+        self.eps_var=torch.tensor([1]).cuda()
+        self.control_init= torch.zeros(2).cuda()
+        self.set_mode=set_mode
+
+        state_mean_=(self.state_range_[:,0]+self.state_range_[:,1])/2.0
+        state_var_=(self.state_range_[:,1]-self.state_range_[:,0])/2.0
+        super().__init__(
+            name="Dubins3D2D_Human_predict_TV", loss_type='brt_hjivi_TV', set_mode=set_mode,
+            state_dim=9, input_dim=13, control_dim=2, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),    
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def interpolate_control(self, state, time, T):
+        # T = self.tMax # when MPC is used, T is the MPC horizon, so it is not always tMax, so we need to use tMax here
+        """
+        Linear interpolation of control sequence for the second vehicle
+        state: [x1, y1, θ1, x2, y2, θ2, u_0, u_1, ..., u_{T-1}] Typically T is 2 here (u_0 u_(T-1))
+        time: current time (raw time values over full simulation time)
+        
+        Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        """
+        # Extract control sequence (last control_sequence_length elements)
+        control_sequence = state[..., 5:5+self.control_sequence_length]
+        
+        # Ensure time is on the same device as state
+        if isinstance(time, (int, float)):
+            time = torch.tensor(time, device=state.device, dtype=state.dtype)
+        else:
+            time = time.to(device=state.device)
+        
+        # Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        u_0 = control_sequence[..., 0] # heading
+        u_1 = control_sequence[..., 1] # heading
+        control_heading = u_0 + (u_1 - u_0) * (time / self.tMax )
+
+        u_2 = control_sequence[..., 2] # velocity
+        u_3 = control_sequence[..., 3] # velocity
+        control_vel = u_2 + (u_3 - u_2) * (time / self.tMax )
+
+        control_value = torch.stack([control_heading, control_vel], dim=-1)
+        
+        return control_value
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+    
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (
+            wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+3
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:7] = input[..., 4:6]
+        transformed_input[..., 7] = torch.sin(input[..., 6]*math.pi)
+        transformed_input[..., 8] = torch.cos(input[..., 6]*math.pi)
+        transformed_input[..., 9] = torch.sin(input[..., 7]*math.pi)
+        transformed_input[..., 10] = torch.cos(input[..., 7]*math.pi)
+        transformed_input[..., 11:] = input[..., 8:]
+
+        return transformed_input.cuda()
+    
+    # Dubins3D dynamics with 2D control + human
+    # \dot x    = u_2 \cos \theta
+    # \dot y    = u_2 \sin \theta
+    # \dot \theta = u_1
+    # \dot x_h = u_4 \cos \u_3
+    # \dot y_h = u_4 \sin \u_3
+
+    # u_1, u_2 :  heading angle of human state[..., 2]
+    # u_3, u_4 : linear velocity of human state[..., 6]
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = control[..., 1] * torch.cos(state[..., 2])
+        dsdt[..., 1] = control[..., 1] * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        if time is not None:
+            control_human = self.interpolate_control(state, time, T)
+            dsdt[..., 3] = control_human[..., 1] * torch.cos(control_human[..., 0])
+            dsdt[..., 4] = control_human[..., 1] * torch.sin(control_human[..., 0])
+        else:
+            dsdt[..., 3] = state[..., 6] * torch.cos(state[..., 5])
+            dsdt[..., 4] = state[..., 6] * torch.sin(state[..., 5])
+
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2] - state[..., 3:5], dim=-1) - self.goalR
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds, time=None, T=None):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            h = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max * optimal_v_indicator, 
+                           self.v_min * optimal_v_indicator)
+            h = h + self.omega_max * torch.abs(dvds[..., 2]) 
+
+            control_human = self.interpolate_control(state, time, T)
+            h = h +  dvds[..., 3] * control_human[..., 1] * torch.cos(control_human[..., 0]) + dvds[..., 4] * control_human[..., 1] * torch.sin(control_human[..., 0])
+            return h
+
+        elif self.set_mode =="reach":
+            # TODO: check this
+            return self.max_velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2]) 
+        else:
+            raise NotImplementedError
+        
+    def optimal_control(self, state, dvds):
+        if self.set_mode =="avoid":
+            optimal_v_indicator = (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1])
+            # Use element-wise operations instead of conditional
+            optimal_v = torch.where(optimal_v_indicator >= 0, 
+                           self.v_max, 
+                           self.v_min)
+            optimal_omega = self.omega_max * torch.sign(dvds[..., 2])
+
+            return torch.stack([optimal_omega, optimal_v], dim=-1)
+        elif self.set_mode =="reach":
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0, 0, 0, -3.14, 0, 1, 1],
+            'state_labels': ['x', 'y', r'$\theta$', 'x_h', 'y_h', r'$\omega_h$', r'$\omega_h$', 'v_h', 'v_h'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
+
+class Dubins4D_Human_Predict_TV(Dynamics):
+    """
+    Dubins4D + human obstacle with time-varying control
+    TODO: implement this and Worst-case Value function for this system
+    """
+    
+    def __init__(self, set_mode: str):
+        self.goalR = 0.5
+        self.max_velocity = 1.
+        self.omega_max = 2.0
+        self.v_max = 2.0
+        self.v_min = 0.0
+        self.a_max = 2.0
+        self.a_min = -2.0
+        self.v_human_max = 1.0
+        self.v_human_min = 0.0
+        self.control_sequence_length = 4
+        self.tMax = 2.0
+        self.state_range_ = torch.tensor([[-5, 5],[-5, 5],[-math.pi, math.pi], [self.v_min, self.v_max*1.1], [-5, 5], [-5, 5],\
+            [-math.pi, math.pi], [-math.pi, math.pi], [self.v_human_min, self.v_human_max*1.1], [self.v_human_min, self.v_human_max*1.1]]).cuda()
+        self.control_range_ =  \
+            torch.tensor([[-self.omega_max, self.omega_max], [self.a_min, self.a_max]]).cuda()
+        self.eps_var=torch.tensor([1]).cuda()
+        self.control_init= torch.zeros(2).cuda()
+        self.set_mode=set_mode
+
+        state_mean_=(self.state_range_[:,0]+self.state_range_[:,1])/2.0
+        state_var_=(self.state_range_[:,1]-self.state_range_[:,0])/2.0
+        super().__init__(
+            name="Dubins4D_Human_Predict_TV", loss_type='brt_hjivi_TV', set_mode=set_mode,
+            state_dim=10, input_dim=14, control_dim=2, disturbance_dim=0,
+            state_mean=state_mean_.cpu().tolist(),
+            state_var=state_var_.cpu().tolist(),    
+            value_mean=0.5,
+            value_var=1,
+            value_normto=0.02,
+            deepReach_model='exact'
+        )
+
+    def interpolate_control(self, state, time, T):
+        # T = self.tMax # when MPC is used, T is the MPC horizon, so it is not always tMax, so we need to use tMax here
+        """
+        Linear interpolation of control sequence for the second vehicle
+        state: [x1, y1, θ1, x2, y2, θ2, u_0, u_1, ..., u_{T-1}] Typically T is 2 here (u_0 u_(T-1))
+        time: current time (raw time values over full simulation time)
+        
+        Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        """
+        # Extract control sequence (last control_sequence_length elements)
+        control_sequence = state[..., 5:5+self.control_sequence_length]
+        
+        # Ensure time is on the same device as state
+        if isinstance(time, (int, float)):
+            time = torch.tensor(time, device=state.device, dtype=state.dtype)
+        else:
+            time = time.to(device=state.device)
+        
+        # Linear interpolation: u_0 + (u_1 - u_0) * t/T
+        u_0 = control_sequence[..., 0] # heading
+        u_1 = control_sequence[..., 1] # heading
+        control_heading = u_0 + (u_1 - u_0) * (time / self.tMax )
+
+        u_2 = control_sequence[..., 2] # velocity
+        u_3 = control_sequence[..., 3] # velocity
+        control_acc = u_2 + (u_3 - u_2) * (time / self.tMax )
+
+        control_value = torch.stack([control_heading, control_acc], dim=-1)
+        
+        return control_value
+
+    def control_range(self, state):
+        return [[-self.omega_max, self.omega_max], [self.v_min, self.v_max]]
+
+    def state_test_range(self):
+        return self.state_range_.cpu().tolist()
+    
+    def state_verification_range(self):
+        return self.state_range_.cpu().tolist()
+
+    def equivalent_wrapped_state(self, state):
+        wrapped_state = torch.clone(state)
+        wrapped_state[..., 2] = (
+            wrapped_state[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped_state
+
+    def periodic_transform_fn(self, input):
+        output_shape = list(input.shape)
+        output_shape[-1] = output_shape[-1]+3
+        transformed_input = torch.zeros(output_shape)
+        transformed_input[..., :3] = input[..., :3]
+        transformed_input[..., 3] = torch.sin(input[..., 3]*math.pi)
+        transformed_input[..., 4] = torch.cos(input[..., 3]*math.pi)
+        transformed_input[..., 5:8] = input[..., 4:7]
+        transformed_input[..., 8] = torch.sin(input[..., 7]*math.pi)
+        transformed_input[..., 9] = torch.cos(input[..., 7]*math.pi)
+        transformed_input[..., 10] = torch.sin(input[..., 8]*math.pi)
+        transformed_input[..., 11] = torch.cos(input[..., 8]*math.pi)
+        transformed_input[..., 12:] = input[..., 9:]
+
+        return transformed_input.cuda()
+    
+    # Dubins4D dynamics + human
+    # \dot x    = v \cos \theta
+    # \dot y    = v \sin \theta
+    # \dot \theta = u_1
+    # \dot v = u_2
+    # \dot x_h = u_4 \cos \u_3
+    # \dot y_h = u_4 \sin \u_3
+
+    # u_1, u_2 :  angular velocity and linear acceleration of dubins4D 
+    # u_3, u_4 : heading angle and linear velocity of human 
+
+    def dsdt(self, state, control, disturbance, time=None, T=None):
+        dsdt = torch.zeros_like(state)
+        dsdt[..., 0] = state[..., 3] * torch.cos(state[..., 2])
+        dsdt[..., 1] = state[..., 3] * torch.sin(state[..., 2])
+        dsdt[..., 2] = control[..., 0]
+        dsdt[..., 3] = control[..., 1] 
+        if time is not None:
+            control_human = self.interpolate_control(state, time, T)
+            dsdt[..., 4] = control_human[..., 1] * torch.cos(control_human[..., 0])
+            dsdt[..., 5] = control_human[..., 1] * torch.sin(control_human[..., 0])
+        else:
+            dsdt[..., 4] = state[..., 6] * torch.cos(state[..., 5])
+            dsdt[..., 5] = state[..., 6] * torch.sin(state[..., 5])
+
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2] - state[..., 3:5], dim=-1) - self.goalR
+
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError
+
+    def cost_fn(self, state_traj):
+        return torch.min(self.boundary_fn(state_traj), dim=-1).values
+
+    def hamiltonian(self, state, dvds, time=None, T=None):
+        if self.set_mode =="avoid":
+            opt_control = self.optimal_control(state, dvds)
+            dsdt_ = self.dsdt(state, opt_control, None, time, T)
+            ham = torch.sum(dvds*dsdt_, dim=-1)
+            return ham
+
+        elif self.set_mode =="reach":
+            # TODO: check this
+            return self.max_velocity * (torch.cos(state[..., 2]) * dvds[..., 0] + torch.sin(state[..., 2]) * dvds[..., 1]) - self.omega_max * torch.abs(dvds[..., 2]) 
+        else:
+            raise NotImplementedError
+        
+    def optimal_control(self, state, dvds):
+        if self.set_mode =="avoid":
+            omega_optimal = self.omega_max * torch.sign(dvds[..., 2])
+            acc_optimal = self.a_max * torch.sign(dvds[..., 3]) * ((state[..., 3] > self.v_min) & (state[..., 3] < self.v_max))
+            return torch.stack([omega_optimal, acc_optimal], dim=-1)
+        elif self.set_mode =="reach":
+            return -(self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+        else:
+            raise NotImplementedError
+
+    def optimal_disturbance(self, state, dvds):
+        return 0
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0, self.v_max, 0, 0, -3.14, 0, 1, 1],
+            'state_labels': ['x', 'y', r'$\theta$', 'v', 'x_h', 'y_h', r'$\omega_h$', r'$\omega_h$', 'v_h', 'v_h'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
+
 class Quadrotor(Dynamics):
     def __init__(self, collisionR: float, collective_thrust_max: float,  set_mode: str):  # simpler quadrotor
         self.collective_thrust_max = collective_thrust_max

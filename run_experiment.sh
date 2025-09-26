@@ -52,3 +52,15 @@ python run_experiment.py --mode train --experiment_name LessLinear40D --use_wand
 python run_experiment.py --mode test --experiment_name LessLinear40D --checkpoint_toload -1 --data_step run_basic_recovery
 # To plot validation. Plot available under ./runs/VD/basic_BRTs.png
 python run_experiment.py --mode test --experiment_name LessLinear40D --checkpoint_toload -1 --data_step plot_ND
+
+############################################# TwoDubins3D_TimeVarying #########################################################
+# To train (exp time: 1h on RTX 4090)
+python run_experiment.py --mode train --experiment_name TwoDubins_TimeVarying_MPC --dynamics_class TwoDubins3D_TimeVarying --tMax 1 --pretrain --pretrain_iters 1000 --num_epochs 120000 --counter_end 100000 --num_nl 512 --set_mode avoid --lr 3e-5 --num_iterative_refinement 10 --MPC_batch_size 3000 --num_MPC_batches 5 --num_MPC_data_samples 5000 --numpoints 10000 --use_wandb --wandb_project particle_deepreach --wandb_name TwoDubins_TimeVarying_MPC --wandb_group TwoDubins3D_TimeVarying_MPC --wandb_entity hyeontaesung-korea-advanced-institute-of-science-and-tec
+
+############################################## Dubins3D2D_human_predict_TV #########################################################
+# To train (exp time: 1h on RTX 4090)
+python run_experiment.py --mode train --experiment_name Dubins3D2D_human_predict --dynamics_class Dubins3D2D_Human_predict --tMax 1 --pretrain --pretrain_iters 1000 --num_epochs 120000 --counter_end 100000 --num_nl 512 --set_mode avoid --lr 3e-5 --num_iterative_refinement 10 --MPC_batch_size 3000 --num_MPC_batches 5 --num_MPC_data_samples 5000 --numpoints 10000 --use_wandb --wandb_project particle_deepreach --wandb_name Dubins3D2D_human_pred_MPC --wandb_group Dubins3D2D_human_pred_MPC --wandb_entity hyeontaesung-korea-advanced-institute-of-science-and-tec
+
+############################################## Dubins4D_Human_Predict_TV #########################################################
+# To train (exp time: 1h on RTX 4090)
+python run_experiment.py --mode train --experiment_name Dubins4D_Human_Predict_TV_MPC --dynamics_class Dubins4D_Human_Predict_TV --tMax 1 --pretrain --pretrain_iters 1000 --num_epochs 120000 --counter_end 100000 --num_nl 512 --set_mode avoid --lr 3e-5 --num_iterative_refinement 10 --MPC_batch_size 3000 --num_MPC_batches 5 --num_MPC_data_samples 5000 --numpoints 10000 --use_wandb --wandb_project particle_deepreach --wandb_name Dubins4D_Human_Predict_TV_MPC --wandb_group Dubins4D_Human_Predict_TV_MPC --wandb_entity hyeontaesung-korea-advanced-institute-of-science-and-tec

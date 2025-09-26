@@ -248,10 +248,10 @@ def scenario_optimization(model,  dynamics, tMin, tMax, dt, set_type, control_ty
                 # state_trajs[is_unfrozen, k+1] = dynamics.equivalent_wrapped_state(state_trajs[is_unfrozen, k].cuda() + dt*dynamics.dsdt(
                 #     state_trajs[is_unfrozen, k].cuda(), ctrl_trajs[is_unfrozen, k].cuda(), dstb_trajs[is_unfrozen, k].cuda(), torch.ones((scenario_batch_size, 1)).cuda())).cpu()
                 state_trajs[is_unfrozen, k+1] = dynamics.equivalent_wrapped_state(state_trajs[is_unfrozen, k].cuda() + dt*dynamics.dsdt(
-                    state_trajs[is_unfrozen, k].cuda(), ctrl_trajs[is_unfrozen, k].cuda(), dstb_trajs[is_unfrozen, k].cuda()).cuda()).cpu()
+                    state_trajs[is_unfrozen, k].cuda(), ctrl_trajs[is_unfrozen, k].cuda(), dstb_trajs[is_unfrozen, k].cuda(), time= k*dt, T= tMax).cuda()).cpu()
             else:
                 next_state_ = dynamics.equivalent_wrapped_state(state_trajs[:, k].cuda(
-                ) + dt*dynamics.dsdt(state_trajs[:, k].cuda(), ctrl_trajs[:, k].cuda(), dstb_trajs[:, k].cuda()))
+                ) + dt*dynamics.dsdt(state_trajs[:, k].cuda(), ctrl_trajs[:, k].cuda(), dstb_trajs[:, k].cuda(),  time= k*dt, T= tMax))
                 state_trajs[:, k+1] = next_state_
        
 

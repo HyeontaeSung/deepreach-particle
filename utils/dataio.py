@@ -130,7 +130,8 @@ class ReachabilityDataset(Dataset):
                            sample_mode=self.MPC_sample_mode, lambda_=self.MPC_lambda_, style=self.MPC_style, num_iterative_refinement=self.num_iterative_refinement)
         device = 'cuda'
         MPC_states = self.sample_init_state()
-
+        print(f"DEBUG: T:{T}")
+        print(f"DEBUG: t:{t}")
         _, _, MPC_inputs, MPC_values = self.mpc.get_batch_data(
             MPC_states.cuda(), T, self.policy, t=t)  # Make sure to generate at least one batch of data at T, so we have "look-ahead" MPC labels for deepreach
         for i in tqdm(range(self.num_MPC_batches-1)):
@@ -139,6 +140,8 @@ class ReachabilityDataset(Dataset):
             if self.mpc.style == "direct":
                 t_max = random.randint(1, math.floor(
                     (T*1.1)/self.MPC_dt))*self.MPC_dt
+                print(f"DEBUG: t_max:{t_max}")
+                print(f"DEBUG: MPC_dt:{self.MPC_dt}")
             elif self.mpc.style == "receding":
                 t_max = random.randint(1, int(
                     T/self.MPC_dt/self.mpc.receding_horizon))*self.mpc.receding_horizon*self.MPC_dt
@@ -149,6 +152,7 @@ class ReachabilityDataset(Dataset):
             if style == "terminal" and i < self.num_MPC_batches/2:
                 t_max = T*1.0  # more data on the terminal time
             # t_max=self.tMax
+            print(f"DEBUG: t_max:{t_max}")
             _, _, MPC_inputs_, MPC_values_ = self.mpc.get_batch_data(
                 MPC_states.to(device), t_max, self.policy, t=t)
             MPC_inputs = torch.cat([MPC_inputs, MPC_inputs_], dim=0)
@@ -295,5 +299,8 @@ class ReachabilityDataset(Dataset):
             return {'model_inputs': model_inputs, 'MPC_inputs': MPC_inputs_}, \
                 {'boundary_values': boundary_values, 'reach_values': reach_values, 'avoid_values': avoid_values, 'dirichlet_masks': dirichlet_masks,
                  'MPC_values': MPC_values_}
+        elif self.dynamics.loss_type == 'brt_hjivi_TV':
+            return {'model_inputs': model_inputs, 'MPC_inputs': MPC_inputs_}, \
+                {'boundary_values': boundary_values, 'dirichlet_masks': dirichlet_masks, 'MPC_values': MPC_values_}
         else:
             raise NotImplementedError

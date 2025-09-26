@@ -345,6 +345,9 @@ if (mode == 'all') or (mode == 'train'):
     elif dynamics.loss_type == 'brat_hjivi':
         loss_fn = losses.init_brat_hjivi_loss(
             dynamics, orig_opt.minWith, orig_opt.dirichlet_loss_divisor, orig_opt.MPC_loss_type, (not orig_opt.not_use_MPC), MPC_finetune_lambda = orig_opt.MPC_finetune_lambda)
+    elif dynamics.loss_type == 'brt_hjivi_TV':
+        loss_fn = losses.init_brt_hjivi_TV_loss(
+            dynamics, orig_opt.minWith, orig_opt.dirichlet_loss_divisor, orig_opt.MPC_loss_type, (not orig_opt.not_use_MPC), MPC_finetune_lambda = orig_opt.MPC_finetune_lambda)
     else:
         raise NotImplementedError
     experiment.train(

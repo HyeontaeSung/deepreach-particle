@@ -37,6 +37,7 @@ class MPC:
                 value_labels: bootstrapped MPC value labels  (?)
         '''
         self.T = T*1.0
+        # print(f"DEBUG: T:{self.T}")
         self.batch_size = initial_condition_tensor.shape[0]
         if self.dynamics_.set_mode in ['avoid', 'reach']:
             state_trajs, lxs, num_iters = self.get_opt_trajs(
@@ -54,9 +55,13 @@ class MPC:
         # generating MPC dataset: {..., (t, x, J, u), ...} NEW
         coords = torch.empty(0, self.dynamics_.state_dim+1).to(self.device)
         value_labels = torch.empty(0).to(self.device)
+        print(f"DEBUG: state_trajs shape: {state_trajs.shape}")
+        print(f"DEBUG: lxs shape: {lxs.shape}")
+        print(f"DEBUG: num_iters: {num_iters}")
         # bootstrapping will be accurate up until the min l(x) occur
         if self.dynamics_.set_mode in ['avoid', 'reach']:
             _, min_idx = torch.min(lxs, dim=-1)
+            print(f"DEBUG: min_idx: {min_idx}")
         elif self.dynamics_.set_mode == 'reach_avoid':
             _, min_idx = torch.min(torch.clamp(
                 reach_values, min=torch.max(-avoid_values, dim=-1).values.unsqueeze(-1)), dim=-1)
@@ -64,6 +69,7 @@ class MPC:
             coord_i = torch.zeros(
                 self.batch_size, self.dynamics_.state_dim+1).to(self.device)
             coord_i[:, 0] = self.T - i * self.dT
+            # print(f"DEBUG: coord_i[:, 0]: {coord_i[:, 0]}")
             coord_i[:, 1:] = state_trajs[:, i, :]*1.0
             if self.dynamics_.set_mode in ['avoid', 'reach']:
                 valid_idx = (min_idx > i).nonzero(as_tuple=True)
@@ -89,6 +95,13 @@ class MPC:
         in_range_index = torch.logical_and(torch.logical_and(
             output1, output2), ~torch.isnan(value_labels))
 
+        print(f"DEBUG: Total coords before filtering: {coords.shape[0]}")
+        print(f"DEBUG: In range coords: {in_range_index.sum()}")
+        print(f"DEBUG: NaN values: {torch.isnan(value_labels).sum()}")
+        print(f"DEBUG: Out of range (x): {(coords[..., 1] < self.dynamics_.state_range_[0, 0]-0.01).sum() + (coords[..., 1] > self.dynamics_.state_range_[0, 1]+0.01).sum()}")
+        print(f"DEBUG: Out of range (y): {(coords[..., 2] < self.dynamics_.state_range_[1, 0]-0.01).sum() + (coords[..., 2] > self.dynamics_.state_range_[1, 1]+0.01).sum()}")
+        print(f"DEBUG: Out of range (theta): {(coords[..., 3] < self.dynamics_.state_range_[2, 0]-0.01).sum() + (coords[..., 3] > self.dynamics_.state_range_[2, 1]+0.01).sum()}")
+
         coords = coords[in_range_index]
         value_labels = value_labels[in_range_index]
         ###################################################################################################
@@ -111,6 +124,7 @@ class MPC:
         '''
         num_iters = math.ceil((self.T)/self.dT)
         self.horizon = math.ceil((self.T)/self.dT)
+        print(f"DEBUG: T={self.T}, dT={self.dT}, num_iters={num_iters}")
 
         self.incremental_horizon = math.ceil((self.T-t)/self.dT)
         if self.style == 'direct':
@@ -126,9 +140,11 @@ class MPC:
             # optimize on the entire horizon for stability (in case that the current learned value function is not accurate)
             best_controls, best_trajs = self.get_control(
                 initial_condition_tensor, self.num_iterative_refinement, policy, t_remaining=t)
+            print(f"DEBUG: best_trajs shape after get_control: {best_trajs.shape}")
 
             if self.dynamics_.set_mode in ['avoid', 'reach']:
                 lxs = self.dynamics_.boundary_fn(best_trajs)
+                print(f"DEBUG: lxs shape: {lxs.shape}")
                 return best_trajs, lxs, num_iters
             elif self.dynamics_.set_mode == 'reach_avoid':
                 avoid_values = self.dynamics_.avoid_fn(best_trajs)
@@ -160,8 +176,9 @@ class MPC:
                 for k in range(self.receding_horizon):
                     lxs[:, i*self.receding_horizon+k] = self.dynamics_.boundary_fn(
                         state_trajs[:, i*self.receding_horizon+k, :])
+                    # print(f"DEBUG: t=(i*self.receding_horizon+k)*self.dT:{(i*self.receding_horizon+k)*self.dT}")
                     state_trajs[:, i*self.receding_horizon+1+k, :] = self.get_next_step_state(
-                        state_trajs[:, i*self.receding_horizon+k, :], best_controls[:, k, :])
+                        state_trajs[:, i*self.receding_horizon+k, :], best_controls[:, k, :], t=(i*self.receding_horizon+k)*self.dT, T=self.T)
                     self.receiding_start += 1
             lxs[:, -1] = self.dynamics_.boundary_fn(state_trajs[:, -1, :])
             return state_trajs, lxs, num_iters
@@ -299,8 +316,9 @@ class MPC:
                 traj_coords[:, 1:].to(self.device), traj_dvs[..., 1:].to(self.device))
             self.control_tensors[:, k+policy_start_iter, :] = self.dynamics_.clamp_control(
                 state_trajs[:, k, :], self.control_tensors[:, k+policy_start_iter, :])
+            # print(f"DEBUG: t=(policy_start_iter+k)*self.dT:{(policy_start_iter+k)*self.dT}")
             state_trajs[:, k+1, :] = self.get_next_step_state(
-                state_trajs[:, k, :], self.control_tensors[:, k+policy_start_iter, :])
+                state_trajs[:, k, :], self.control_tensors[:, k+policy_start_iter, :], t=(policy_start_iter+k)*self.dT, T=self.T)
 
             state_trajs_clamped[:, k+1, :] = torch.clamp(state_trajs[:, k+1, :], torch.tensor(self.dynamics_.state_test_range(
             )).to(self.device)[..., 0], torch.tensor(self.dynamics_.state_test_range()).to(self.device)[..., 1])
@@ -377,9 +395,9 @@ class MPC:
         state_trajs[:, 0, :] = initial_state_tensor*1.0  # A * D
 
         for k in range(self.horizon):
-
+            # print(f"DEBUG: t=k*self.dT:{(k)*self.dT}")
             state_trajs[:, k+1, :] = self.get_next_step_state(
-                state_trajs[:, k, :], self.control_tensors[:, k, :])
+                state_trajs[:, k, :], self.control_tensors[:, k, :], t=k*self.dT, T=self.T)
         return state_trajs
 
     def rollout_dynamics(self, initial_state_tensor, start_iter, rollout_horizon, eps_var_factor=1):
@@ -424,9 +442,9 @@ class MPC:
         for k in range(rollout_horizon):
             permuted_controls[:, :, k, :] = self.dynamics_.clamp_control(
                 state_trajs[:, :, k, :], permuted_controls[:, :, k, :])
+            # print(f"DEBUG: t=(k+start_iter)*self.dT:{(k+start_iter)*self.dT}")
             state_trajs[:, :, k+1, :] = self.get_next_step_state(
-                state_trajs[:, :, k, :], permuted_controls[:, :, k, :])
-
+                state_trajs[:, :, k, :], permuted_controls[:, :, k, :], t=(k+start_iter)*self.dT, T=self.T)
         return state_trajs, permuted_controls
 
     def init_control_tensors(self):
@@ -436,9 +454,9 @@ class MPC:
         self.control_tensors = self.control_init.unsqueeze(
             1).repeat(1, self.horizon, 1)  # A * H * D_u
 
-    def get_next_step_state(self, state, controls):
+    def get_next_step_state(self, state, controls, t= None, T= None):
         current_dsdt = self.dynamics_.dsdt(
-            state, controls, None)
+            state, controls, None, t, T)
         next_states = self.dynamics_.equivalent_wrapped_state(
             state + current_dsdt*self.dT)
         # next_states = torch.clamp(next_states, self.dynamics_.state_range_[..., 0], self.dynamics_.state_range_[..., 1])

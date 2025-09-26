@@ -96,6 +96,8 @@ class Experiment(ABC):
                                            self.dataset.counter/self.dataset.counter_end)*(self.dataset.tMax-self.dataset.tMin)
                 
                 if self.dataset.refine_dataset:
+                    # print(f"DEBUG: time_interval_length:{time_interval_length}")
+                    # print(f"DEBUG: epoch:{epoch}")
                     self.dataset_refinement(time_interval_length, epoch)
                     
 
@@ -147,6 +149,11 @@ class Experiment(ABC):
                         losses = loss_fn(
                             states, values, dvs[..., 0], dvs[..., 1:], boundary_values, reach_values, avoid_values, dirichlet_masks, model_results[
                                 'model_out'], MPC_values, gt['MPC_values'],self.use_MPC_terminal_loss)
+                    elif self.dataset.dynamics.loss_type == 'brt_hjivi_TV':
+                        # print(f"DEBUG: model_results['model_in'].detach()[..., 0]:{model_results['model_in'].detach()[..., 0]}")
+                        losses = loss_fn(
+                            states, values, dvs[..., 0], dvs[..., 1:], boundary_values, dirichlet_masks, model_results['model_out'],
+                            MPC_values, gt['MPC_values'],self.use_MPC_terminal_loss, model_results['model_in'].detach()[..., 0], self.dataset.tMax)   
                     else:
                         raise NotImplementedError
 

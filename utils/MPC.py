@@ -55,13 +55,10 @@ class MPC:
         # generating MPC dataset: {..., (t, x, J, u), ...} NEW
         coords = torch.empty(0, self.dynamics_.state_dim+1).to(self.device)
         value_labels = torch.empty(0).to(self.device)
-        print(f"DEBUG: state_trajs shape: {state_trajs.shape}")
-        print(f"DEBUG: lxs shape: {lxs.shape}")
-        print(f"DEBUG: num_iters: {num_iters}")
+
         # bootstrapping will be accurate up until the min l(x) occur
         if self.dynamics_.set_mode in ['avoid', 'reach']:
             _, min_idx = torch.min(lxs, dim=-1)
-            print(f"DEBUG: min_idx: {min_idx}")
         elif self.dynamics_.set_mode == 'reach_avoid':
             _, min_idx = torch.min(torch.clamp(
                 reach_values, min=torch.max(-avoid_values, dim=-1).values.unsqueeze(-1)), dim=-1)
@@ -94,13 +91,6 @@ class MPC:
                             :, 1]+0.01, -1, keepdim=False)
         in_range_index = torch.logical_and(torch.logical_and(
             output1, output2), ~torch.isnan(value_labels))
-
-        print(f"DEBUG: Total coords before filtering: {coords.shape[0]}")
-        print(f"DEBUG: In range coords: {in_range_index.sum()}")
-        print(f"DEBUG: NaN values: {torch.isnan(value_labels).sum()}")
-        print(f"DEBUG: Out of range (x): {(coords[..., 1] < self.dynamics_.state_range_[0, 0]-0.01).sum() + (coords[..., 1] > self.dynamics_.state_range_[0, 1]+0.01).sum()}")
-        print(f"DEBUG: Out of range (y): {(coords[..., 2] < self.dynamics_.state_range_[1, 0]-0.01).sum() + (coords[..., 2] > self.dynamics_.state_range_[1, 1]+0.01).sum()}")
-        print(f"DEBUG: Out of range (theta): {(coords[..., 3] < self.dynamics_.state_range_[2, 0]-0.01).sum() + (coords[..., 3] > self.dynamics_.state_range_[2, 1]+0.01).sum()}")
 
         coords = coords[in_range_index]
         value_labels = value_labels[in_range_index]
@@ -140,11 +130,9 @@ class MPC:
             # optimize on the entire horizon for stability (in case that the current learned value function is not accurate)
             best_controls, best_trajs = self.get_control(
                 initial_condition_tensor, self.num_iterative_refinement, policy, t_remaining=t)
-            print(f"DEBUG: best_trajs shape after get_control: {best_trajs.shape}")
 
             if self.dynamics_.set_mode in ['avoid', 'reach']:
                 lxs = self.dynamics_.boundary_fn(best_trajs)
-                print(f"DEBUG: lxs shape: {lxs.shape}")
                 return best_trajs, lxs, num_iters
             elif self.dynamics_.set_mode == 'reach_avoid':
                 avoid_values = self.dynamics_.avoid_fn(best_trajs)

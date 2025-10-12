@@ -227,7 +227,7 @@ class IntentAwarePlanner:
         time_to_goal = None  # Will store the time when goal is reached
         steps_to_goal = None  # Will store the number of steps
         
-        print(f"\n🚀 Starting simulation: T_max={config.T_max}")
+        print(f"\n Starting simulation: T_max={config.T_max}")
         print(f"   Obstacle target: {config.target_goal}")
         
         # Main simulation loop
@@ -283,7 +283,7 @@ class IntentAwarePlanner:
                 goal_reached = True
                 steps_to_goal = t + 1
                 time_to_goal = (t + 1) * config.dt_exec
-                print(f"✅ Goal reached at step {steps_to_goal} (time: {time_to_goal:.2f}s)")
+                print(f" Goal reached at step {steps_to_goal} (time: {time_to_goal:.2f}s)")
                 break
             
             # # Print progress
@@ -296,7 +296,7 @@ class IntentAwarePlanner:
         # === HANDLE CASE WHERE GOAL NOT REACHED ===
         if not goal_reached:
             final_dist = torch.linalg.vector_norm(x[:2] - goal).item()
-            print(f"⚠️  Goal not reached within {config.T_max} steps")
+            print(f"  Goal not reached within {config.T_max} steps")
             print(f"   Final distance to goal: {final_dist:.3f}m")
             steps_to_goal = config.T_max
             time_to_goal = config.T_max * config.dt_exec
@@ -306,7 +306,7 @@ class IntentAwarePlanner:
         obs_tr = np.array(obs_traj)
         min_dist = metrics_min_distance(tr, obs_tr)
         
-        print(f"\n📊 Simulation Complete!")
+        print(f"\n Simulation Complete!")
         print(f"   Steps: {t+1}")
         print(f"   Time to goal: {time_to_goal:.2f}s")  # ← NEW
         print(f"   Steps to goal: {steps_to_goal}")     # ← NEW

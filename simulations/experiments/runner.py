@@ -308,8 +308,8 @@ class IntentAwarePlanner:
         
         print(f"\n Simulation Complete!")
         print(f"   Steps: {t+1}")
-        print(f"   Time to goal: {time_to_goal:.2f}s")  # ← NEW
-        print(f"   Steps to goal: {steps_to_goal}")     # ← NEW
+        print(f"   Time to goal: {time_to_goal:.2f}s")  
+        print(f"   Steps to goal: {steps_to_goal}")     
         print(f"   Min distance to obstacle: {min_dist:.3f}m")
         print(f"   Avg update time: {np.mean(update_times):.4f}s")
         print(f"   Avg planning time: {np.mean(planning_times):.4f}s")
@@ -326,9 +326,9 @@ class IntentAwarePlanner:
             'min_distance': min_dist,
             'update_times': update_times,
             'planning_times': planning_times,
-            'time_to_goal': time_to_goal,        # ← NEW
-            'steps_to_goal': steps_to_goal,      # ← NEW
-            'goal_reached': goal_reached,        # ← NEW
+            'time_to_goal': time_to_goal,        
+            'steps_to_goal': steps_to_goal,      
+            'goal_reached': goal_reached,        
             'config': config
         }
         
@@ -396,7 +396,7 @@ class IntentAwarePlanner:
             print("No cvar values to plot")
 
 
-        print(f"📊 Plots saved!")
+        print(f" Plots saved!")
 
 
 def run_experiment(config: Optional[ExperimentConfig] = None) -> dict:

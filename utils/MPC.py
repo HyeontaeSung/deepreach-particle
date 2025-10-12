@@ -114,7 +114,7 @@ class MPC:
         '''
         num_iters = math.ceil((self.T)/self.dT)
         self.horizon = math.ceil((self.T)/self.dT)
-        print(f"DEBUG: T={self.T}, dT={self.dT}, num_iters={num_iters}")
+        # print(f"DEBUG: T={self.T}, dT={self.dT}, num_iters={num_iters}")
 
         self.incremental_horizon = math.ceil((self.T-t)/self.dT)
         if self.style == 'direct':

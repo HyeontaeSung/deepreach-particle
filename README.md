@@ -1,13 +1,19 @@
-# DeepReach_MPC
- Bridging Model Predictive Control and Deep  Learning for Scalable Reachability Analysis
+# DeepReach_Particle
+This repository is built on [DeepReach_MPC](https://github.com/smlbansal/deepreach/tree/DeepReach_MPC) 
 
-Authors: [Zeyuan Feng](https://thezeyuanfeng.github.io/), Le Qiu, [Somil Bansal](http://people.eecs.berkeley.edu/~somil/index.html)
-
-Acknowledgement: This repo is built on [DeepReach](https://github.com/smlbansal/deepreach). Thanks all the maintainers for the supports! <br>
-[Albert Lin](https://www.linkedin.com/in/albertkuilin/),
-[Zeyuan Feng](https://thezeyuanfeng.github.io/),
-[Javier Borquez](https://javierborquez.github.io/),
-[Somil Bansal](http://people.eecs.berkeley.edu/~somil/index.html)<br>
+## High-Level Structure for simulations/
+The code is organized as follows:
+* `experiments/config.py` defines the configuration parameters for planning + safety filtering experiments (planner selection, dynamics models, initial conditions, time parameters, etc.).
+* `experiments/runner.py` contains the main `IntentAwarePlanner` class that orchestrates the simulation, including model loading, intent prediction, planning execution, and trajectory rollouts.
+* `planner/planner.py` implements the MPPI planner with VaR-CBF safety constraints.
+* `planner/probabilistic_safe_motion_planner.py` implements the probabilistic safe motion planner using sampling-based MPC with collision probability constraints.
+* `planner/cbf.py` contains functions to create Control Barrier Value Function (CBF) evaluators from trained DeepReach models.
+* `utils_exp/dynamics.py` defines the dynamics models for Dubins vehicles and pedestrians.
+* `utils_exp/intent_prediction_Pedestrian.py` implements the Bayesian intent inference system for predicting pedestrian goals and rationality levels.
+* `utils_exp/plot.py` contains visualization and animation functions for trajectories, intent predictions, control inputs, and VaR landscapes.
+* `utils_exp/util.py` provides utility functions for tensor operations, angle wrapping, CVaR/VaR computations, and distance metrics.
+* `experiments.ipynb` is the main Jupyter notebook for running and analyzing planning + safety filtering experiments.
+* `experiments_single_scenraio.ipynb` is a simplified notebook for testing single scenario configurations.
 
 ## High-Level Structure
 The code is organized as follows:
